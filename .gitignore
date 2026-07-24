@@ -1,0 +1,6 @@
+.idea/
+files/
+E1_Students/build/
+E1_Students/managed_components/
+**/build
+**/managed_components
