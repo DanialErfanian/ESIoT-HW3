@@ -12,6 +12,8 @@
 #include "esp_timer.h"
 #include "esp_mac.h"
 #include "esp_system.h"
+#include "driver/usb_serial_jtag.h"
+#include "driver/usb_serial_jtag_vfs.h"
 
 #define INPUT_LINE_MAX 160
 #define LAB_MAGIC 0xCE40876AUL
@@ -230,6 +232,42 @@ static void trim_right(char *text)
     }
 }
 
+static bool read_line_echo(char *buffer, size_t buffer_size)
+{
+    size_t index = 0;
+
+    while (true) {
+        int c = getchar();
+
+        if (c == EOF) {
+            vTaskDelay(pdMS_TO_TICKS(20));
+            continue;
+        }
+
+        if (c == '\r' || c == '\n') {
+            putchar('\n');
+            buffer[index] = '\0';
+            return true;
+        }
+
+        if (c == '\b' || c == 0x7F) {  // backspace / DEL
+            if (index > 0) {
+                --index;
+                printf("\b \b");  // erase char on terminal
+                fflush(stdout);
+            }
+            continue;
+        }
+
+        if (index < buffer_size - 1) {
+            buffer[index++] = (char)c;
+            putchar(c);       // echo
+            fflush(stdout);
+        }
+    }
+}
+
+
 static void handle_command(char *line)
 {
     trim_right(line);
@@ -303,6 +341,7 @@ static void handle_command(char *line)
         return;
     }
 
+    printf("%s ", command);
     printf("ERR unknown_command\n");
 }
 
@@ -318,9 +357,7 @@ void uart_task(void *argument)
     fflush(stdout);
 
     while (true) {
-        if (fgets(line, sizeof(line), stdin) == NULL) {
-            clearerr(stdin);
-            vTaskDelay(pdMS_TO_TICKS(20));
+        if (!read_line_echo(line, sizeof(line))) {
             continue;
         }
 
@@ -435,6 +472,13 @@ void app_main(void)
     esp_log_level_set("*", ESP_LOG_WARN);
     setvbuf(stdin, NULL, _IONBF, 0);
     setvbuf(stdout, NULL, _IONBF, 0);
+
+    usb_serial_jtag_driver_config_t usj_cfg = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(usb_serial_jtag_driver_install(&usj_cfg));
+
+    usb_serial_jtag_vfs_use_driver();
+    usb_serial_jtag_vfs_set_rx_line_endings(ESP_LINE_ENDINGS_CR);
+    usb_serial_jtag_vfs_set_tx_line_endings(ESP_LINE_ENDINGS_CRLF);
 
     make_device_id();
     reset_state();
