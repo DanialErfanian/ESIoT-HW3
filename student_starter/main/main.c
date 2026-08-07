@@ -27,6 +27,10 @@
 #define HEALTH_FLAG_SAFETY_BAD       (1UL << 1)
 #define HEALTH_FLAG_HEARTBEAT_STALE  (1UL << 2)
 #define HEALTH_FLAG_UNEXPECTED_MODE  (1UL << 3)
+#define HEALTH_FLAG_BUCKET_GUARD_BAD (1UL << 4)
+
+#define STRESS_GUARD_MAGIC       0x5A17C0DEUL
+#define BUCKET_GUARD_MAGIC       0xB0C4E7A1UL
 
 static const char *TAG = "E3_JTAG";
 
@@ -44,14 +48,16 @@ static char g_device_id[13] = {0};
 
 typedef struct {
     volatile uint32_t buckets[STRESS_BUCKETS];
+    volatile uint32_t bucket_guard;   /* NEW: sacrificial canary, sits between buckets[] and sensitive fields */
     volatile int32_t pending_mode;
     volatile uint32_t guard;
 } stress_state_t;
 
 volatile stress_state_t g_stress_state = {
     .buckets = {0, 0, 0, 0},
+    .bucket_guard = BUCKET_GUARD_MAGIC,
     .pending_mode = 0,
-    .guard = 0x5A17C0DEUL,
+    .guard = STRESS_GUARD_MAGIC,
 };
 
 typedef enum {
@@ -115,8 +121,9 @@ static void reset_state(void)
     for (size_t i = 0; i < STRESS_BUCKETS; ++i) {
         g_stress_state.buckets[i] = 0;
     }
+    g_stress_state.bucket_guard = BUCKET_GUARD_MAGIC;
     g_stress_state.pending_mode = 0;
-    g_stress_state.guard = 0x5A17C0DEUL;
+    g_stress_state.guard = STRESS_GUARD_MAGIC;
 }
 
 static void print_status(void)
@@ -147,11 +154,12 @@ static void print_log(void)
            (unsigned long)g_health_flags,
            (unsigned long)g_heartbeat);
 
-    printf("stress buckets=[%lu,%lu,%lu,%lu] pending_mode=%ld guard=0x%08lx\n",
+    printf("stress buckets=[%lu,%lu,%lu,%lu] bucket_guard=0x%08lx pending_mode=%ld guard=0x%08lx\n",
            (unsigned long)g_stress_state.buckets[0],
            (unsigned long)g_stress_state.buckets[1],
            (unsigned long)g_stress_state.buckets[2],
            (unsigned long)g_stress_state.buckets[3],
+           (unsigned long)g_stress_state.bucket_guard,
            (long)g_stress_state.pending_mode,
            (unsigned long)g_stress_state.guard);
 }
@@ -389,8 +397,8 @@ void sensor_task(void *argument)
             for (uint32_t i = 0; i < request.value; ++i) {
                 uint32_t bucket_index = i / STRESS_BUCKET_WIDTH;
 
-                if (bucket_index > STRESS_BUCKETS) {
-                    bucket_index = STRESS_BUCKETS;
+                if (bucket_index >= STRESS_BUCKETS) {
+                    bucket_index = STRESS_BUCKETS - 1U;
                 }
                 legacy_buckets[bucket_index]++;
                 ++g_event_counter;
@@ -456,6 +464,12 @@ void health_monitor_task(void *argument)
             (now_us - g_last_heartbeat_us) > 3000000ULL) {
             current_flags |= HEALTH_FLAG_HEARTBEAT_STALE;
         }
+
+        /* NEW: detect any adjacent-memory corruption near stress_state buckets */
+        if (g_stress_state.bucket_guard != BUCKET_GUARD_MAGIC ||
+            g_stress_state.guard != STRESS_GUARD_MAGIC) {
+            current_flags |= HEALTH_FLAG_BUCKET_GUARD_BAD;
+            }
 
         g_health_flags = current_flags;
 
